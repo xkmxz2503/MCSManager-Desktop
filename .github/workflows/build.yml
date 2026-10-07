@@ -1,9 +1,12 @@
-name: Build MCSManager Desktop
+name: Build Check
 
 on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
   workflow_dispatch:
-  release:
-    types: [published]
 
 concurrency:
   group: build-${{ github.ref }}
@@ -20,8 +23,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name || github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -50,48 +51,6 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
-      - name: Resolve release version
-        id: version
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if ($env:EVENT_NAME -eq 'release') {
-            if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
-              throw "Release tags must match vX.Y.Z; received '$env:RELEASE_TAG'."
-            }
-            $version = $env:RELEASE_TAG.Substring(1)
-          } else {
-            $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
-          }
-
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "Resolved application version: $version"
-
-      - name: Apply release version in CI workspace
-        if: github.event_name == 'release'
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          $package = Get-Content -Raw package.json | ConvertFrom-Json
-          $package.version = $env:RELEASE_VERSION
-          $package | ConvertTo-Json -Depth 100 | Set-Content package.json -Encoding utf8
-
-          $tauri = Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json
-          $tauri.version = $env:RELEASE_VERSION
-          $tauri | ConvertTo-Json -Depth 100 | Set-Content src-tauri/tauri.conf.json -Encoding utf8
-
-          $cargo = Get-Content -Raw src-tauri/Cargo.toml
-          $cargo = [regex]::Replace(
-            $cargo,
-            '(?m)^version = "[^"]+"',
-            "version = `"$env:RELEASE_VERSION`"",
-            1
-          )
-          Set-Content src-tauri/Cargo.toml $cargo -Encoding utf8
-
       - name: Run frontend tests
         run: npm test
 
@@ -109,62 +68,3 @@ jobs:
 
       - name: Build Tauri bundles
         run: npm run tauri build
-
-      - name: Collect build artifacts
-        shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          $staging = Join-Path $env:GITHUB_WORKSPACE 'release-assets'
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-
-          $exe = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/target/release/mcsmanager-desktop.exe'
-          if (-not (Test-Path $exe)) {
-            throw "Release executable was not found at '$exe'."
-          }
-          Copy-Item $exe (Join-Path $staging "mcsmanager-desktop-$env:RELEASE_VERSION.exe")
-
-          $nsis = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe' -File)
-          if ($nsis.Count -eq 0) {
-            throw 'NSIS installer was not generated.'
-          }
-          $nsis | Copy-Item -Destination $staging
-
-          $msi = @(Get-ChildItem 'src-tauri/target/release/bundle/msi/*.msi' -File)
-          if ($msi.Count -eq 0) {
-            throw 'MSI installer was not generated.'
-          }
-          $msi | Copy-Item -Destination $staging
-
-          Get-ChildItem $staging | Select-Object Name, Length
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcsmanager-desktop-${{ github.run_id }}
-          path: release-assets/
-          if-no-files-found: error
-          retention-days: 14
-
-  release:
-    name: Create GitHub release
-    if: github.event_name == 'release'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: write
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: mcsmanager-desktop-${{ github.run_id }}
-          path: release-assets
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          fail_on_unmatched_files: true
-          files: release-assets/*
